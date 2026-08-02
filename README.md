@@ -1,185 +1,148 @@
 # Regex Review Console
 
-**Auditing a model-generated bank-statement parser across 6.8 million transactions — a review harness, and what it found.**
+**Checking a machine-generated bank-statement parser across 6.8 million transactions.**
 
-A model generates regexes that parse raw bank transaction notes into ~30
-structured fields. This project is the **review layer on top of that output**:
-the analysis that located the anomalies, the tooling that made the review
-repeatable, and the defect report that came out of it.
-
-📋 **[Findings — 23 defects across 4 themes](FINDINGS.md)** ← the deliverable
+📋 **[The findings — 23 defects](FINDINGS.md)**
 
 ---
 
-## Scale
+## What this is about
+
+When money moves in or out of a bank account, the statement records a short,
+cryptic line of text. Something like:
+
+```
+IMPS/P2A/6058XXXXXXXX/INSTANT CASH FZ/DA Vostro F
+```
+
+A human can just about read that: it's an IMPS transfer, to a company called
+Instant Cash FZ. Software can't — not until someone teaches it where the parts
+are. So a model reads millions of these notes, works out the recurring shapes,
+and writes a **regex** (a pattern-matching rule) for each shape. Each regex pulls
+the line apart into ~30 labelled fields: who was paid, the reference number, the
+date, the payment method, and so on.
+
+That's the system. My job was to check its work.
+
+## The scale of the problem
 
 | | |
 |---|---|
-| Transactions reviewed | **6,811,926** |
-| — debit / credit | 4,762,821 · 2,049,105 |
-| Distinct regexes | **1,832** (829 debit · 1,201 credit) |
-| Distinct transaction notes | 6,146,322 |
-| Extracted feature columns per row | 30 (41 columns total) |
-| Tagsets · categories · sub-categories | 467 · 27 · 28 |
-| Corpus size | ~200 MB parquet → 380 MB local index |
+| Transactions | **6,811,926** |
+| Patterns the model wrote | **1,832** |
+| Fields each pattern tries to extract | 30 |
 
-**The distribution is the first finding.** Transactions per regex:
+The model's output had errors in it. Nobody knew which of the 1,832 patterns
+were wrong, or how.
+
+And you can't find out by looking. A correct pattern and a broken one are both
+just a wall of symbols. The largest single pattern matches **2.3 million
+transactions** — reading its matches to check them is not a thing a person can
+do. Manual spot-checking finds the loud problems and misses everything else.
+
+## How I found the errors
+
+**The trick was to stop looking at transactions and start looking at patterns.**
+6.8 million rows is unreviewable. 1,832 patterns is a to-do list.
+
+So I grouped every transaction under the pattern that matched it, and for each
+pattern measured one thing: **how often does each of the 30 fields actually come
+out filled in?**
+
+That single number does the work. If a pattern matches 40,000 transactions and
+the "who was paid" field comes back empty **every single time**, that pattern is
+broken — it isn't finding the name. You'd never notice reading rows one by one.
+It's impossible to miss in a summary. Suddenly I wasn't reviewing 1,832 patterns,
+I was reviewing the ones with suspicious gaps.
+
+**A second problem showed up in the arithmetic.** Transactions per pattern:
 
 ```
-max     2,344,138     ← one regex covers a third of the corpus
-mean        3,718
-median          4     ← half of all regexes cover 4 transactions or fewer
+largest    2,344,138
+average        3,718
+middle             4      ← half the patterns match 4 transactions or fewer
 ```
 
-A median of 4 against a max of 2.3 M is not a natural long tail — it is
-over-fragmentation. Hundreds of regexes exist because one transaction format got
-split on a delimiter, or because near-identical patterns were emitted separately.
-That single distribution motivated findings A2, A3 and A4.
+Half of all patterns cover four transactions each. That isn't how real
+transaction data behaves — bank statements have a few very common shapes and a
+tail of rare ones, not a thousand near-identical one-offs. It meant the model was
+**splitting one real transaction shape into many patterns**, usually tripping
+over a punctuation mark inside the text. The numbers proved that before I read a
+single pattern.
 
-## Objective
+## What I found
 
-Take the model's generated output and answer three questions:
+23 distinct problems, written up in **[FINDINGS.md](FINDINGS.md)**. A few
+examples of what "wrong" looked like in practice:
 
-1. **Which regexes are wrong?** — out of 1,832, with no labels and no ground truth.
-2. **What is each one failing to extract?** — which of the 30 feature columns
-   stay empty, and why.
-3. **What should the model change?** — actionable, deduplicated, with evidence,
-   not a list of one-off complaints.
-
-The constraint that shapes everything: at 6.8 M rows a bad regex and a good one
-look identical in a spreadsheet, and a regex matching 2.3 M transactions cannot
-be verified by scrolling its matches. The review had to work **per regex**, not
-per transaction.
-
-## Approach
-
-**1. Profiled the generated output** — pandas / numpy over the corpus: per-regex
-aggregation, tagset and category distributions, value-frequency counts on
-extracted fields (`remark` alone had ~14 k distinct values), and **non-empty fill
-rates for all 30 feature columns**.
-
-Fill rates are the workhorse of the whole review. A regex matching 40,000
-transactions that populates `counter_party` in 0 % of them is a feature-map gap
-that is invisible row-by-row and unmissable in a rollup. That one metric turned
-"read 1,832 regexes" into "look at the ones with suspicious zeros".
-
-**2. Built this console** so the review was reproducible and splittable across
-reviewers instead of a one-off notebook — sample transactions under every regex,
-fill-rate panel, and a structured verdict form writing to an audited store.
-
-**3. Reviewed and wrote it up** — [FINDINGS.md](FINDINGS.md).
-
-## What was achieved
-
-- **6.8 M transactions reduced to 1,832 reviewable units**, each with sample
-  evidence and a fill-rate profile — a corpus that could not be read manually
-  became a work queue that could.
-- **23 distinct defects documented** with examples and recommended fixes, from
-  ~30 raw observations after deduplication, grouped into clustering /
-  feature-map integrity / field extraction / business rules.
-- **Four cross-cutting root causes identified** that explain most of the 23 —
-  delimiter handling alone accounts for five separate symptoms. This is what
-  turned a bug list into a fix order.
-- **A reusable harness**, not a one-time analysis: the same tool runs against the
-  next model revision, and multi-reviewer feedback merges with conflict
-  reporting.
-- **Complete audit trail** — every verdict is attributed and versioned; nothing a
-  reviewer typed is silently overwritten.
-
-A sample of what surfaced:
-
-| | Observed | Should be |
+| Transaction text | What the parser did | What it should do |
 |---|---|---|
-| `IMPS/P2A/…/INSTANT CASH FZ/…` | `CASH` lifted out as a keyword, counterparty split around it | CP preserved whole |
-| `220626` | `ref_num` | `datetime` |
-| `LIEN MARKING FOR NACH/…` | counterparty = `MARKING` | full span captured first |
-| `txn_period` | `26/2459` | rejected as unparseable |
-| Two `ATM/CWRR` patterns differing only in `\d{12}` vs `\d{1,4}` | two clusters | one generalised regex |
+| `…/INSTANT CASH FZ/…` | Saw the word "CASH", treated it as a payment type, and split the company name in half | Keep "Instant Cash FZ" together — it's a name |
+| `220626` | Called it a reference number | It's a date — 22 June 2026 |
+| `LIEN MARKING FOR NACH/…` | Recorded the counterparty as "MARKING" | Read the whole line before picking out parts |
+| Two patterns identical except one digit-count | Created two separate groups | One pattern covers both |
+| `txn_period = 26/2459` | Accepted it | There's no month 24 — reject it |
 
-## Challenges
+The more useful output was the layer underneath: those 23 problems trace back to
+**4 underlying causes**. Punctuation handling alone explains five of them. That
+turns "here are 23 bugs" into "fix these four things, in this order" — which is
+the difference between a complaint and a plan.
 
-**No ground truth.** Nothing said which regexes were correct. Every defect had to
-be established from the data itself — anomalous fill rates, implausible values
-(`txn_period = 26/2459`), and structural comparison between near-duplicate
-patterns.
+## The tool
 
-**Skew.** One regex covers 2.3 M transactions, the median covers 4. Uniform
-sampling would have shown the same handful of high-volume formats over and over
-and never reached the fragmented tail — where most of the defects live. The tool
-caps samples *per regex* and can force distinct notes, so a 2.3 M-row regex
-contributes five rows, same as a 4-row one.
+I built a small review app so this could be done properly and repeated on the
+next version of the model, instead of living in a throwaway notebook.
 
-**Query latency at 6.8 M rows.** pandas scans were too slow for an interactive
-loop where every filter change re-queries. Solved by loading into an embedded
-ClickHouse (chdb) MergeTree ordered by `(regex_hash, tags, transaction_type)` and
-precomputing the per-regex summary and a facet cube — filters became instant, and
-the parquet is never read again after the one-time ~10 s build.
+You pick a pattern from a list, and it shows you:
+- real example transactions that pattern matched,
+- the fill-rate scorecard for all 30 fields, so gaps are visible at a glance,
+- a form to record the verdict — what's wrong, what the fix is.
 
-**Distinguishing a regex defect from a business-rule defect.** "`CW` extracted as
-counterparty" and "`CW` should map to flow" look the same in the data but need
-different fixes in different layers. The findings tag each defect
-`CLUSTER` / `EXTRACT` / `RULES` so the model owner knows where it lands.
+Everything reviewers type is saved with full history, so nothing gets
+overwritten, and several people can review different slices and have their work
+merged together afterwards.
 
-**Overlapping observations.** Reviewing 1,832 regexes produces the same
-underlying bug described a dozen different ways. Consolidating ~30 raw notes into
-23 distinct defects and 4 root causes was a substantial part of the work — an
-unmerged list would have sent someone chasing symptoms.
+## Challenges worth mentioning
 
-**Real customer data.** The corpus cannot leave the environment, which ruled out
-hosted dashboards and shaped the deployment model: fully offline, LAN-only
-hosting, and every data artefact excluded from version control.
+**There was no answer key.** Nothing told me which patterns were correct. Every
+error had to be argued from the data itself — impossible values, fields that
+never fill, two patterns that are obviously the same shape.
 
-## Tools
+**The data is wildly lopsided.** One pattern has 2.3 million transactions, most
+have four. Random sampling would have shown me the same few common formats over
+and over and never reached the rare ones — which is exactly where the errors
+were. The tool samples a fixed number of examples *per pattern*, so a
+2.3-million-row pattern gets the same five slots as a four-row one.
 
-| | |
-|---|---|
-| **Analysis** | Python 3.12, pandas, numpy |
-| **Query engine** | [chdb](https://github.com/chdb-io/chdb) — embedded ClickHouse (MergeTree, `uniqExact`, `groupUniqArray`, facet rollups) |
-| **UI** | Streamlit (multi-tab, `st.data_editor` inline grids, cached queries) |
-| **Feedback store** | SQLite — upsert + append-only history, WAL mode |
-| **Storage format** | Apache Parquet (via pyarrow) |
-| **Env / packaging** | uv, pyproject.toml, locked deps |
+**6.8 million rows was too slow to click through.** Ordinary Python tools took
+seconds to respond to every filter change, which kills a review session. I loaded
+the data into an embedded analytics database (ClickHouse, running inside the
+Python process — no server to set up) and pre-computed the summaries. After a
+one-time 10-second build, everything is instant.
 
-## Architecture
+**Too many observations, not enough findings.** Reviewing 1,832 patterns
+generates the same underlying bug described a dozen different ways. Boiling ~30
+raw notes down to 23 distinct problems and 4 root causes was a real part of the
+work — an unmerged list would have sent someone chasing symptoms.
 
-```
-corpus.parquet  ──build_review_db.py──▶  chdb_review/   ──review_app.py──▶  Streamlit UI
- (model output)     (one-time, ~10s)      review.corpus                          │
-   6.8M rows                              review.regex_summary                   ▼
-                                          review.regex_facets            review_feedback.db
-                                                                          (SQLite + audit log)
-```
+## Tools used
 
-- **`build_review_db.py`** — loads the parquet into a persistent chdb MergeTree
-  ordered by `(regex_hash, tags, transaction_type)`, then precomputes a per-regex
-  summary (counts, tagsets, categories, fill rate of every feature column) and a
-  facet cube for the sidebar filters.
-- **`review_app.py`** — three tabs. *Review*: pick a regex, see representative
-  samples, see which feature columns are never populated, record a verdict.
-  *Browse samples*: an editable grid for triaging many regexes inline.
-  *Feedback store*: everything recorded, per-regex history, CSV / JSON export.
-  Filters on tag combination, transaction type, category, regex substring, review
-  status, and a per-regex sample cap with a distinct-notes option.
-- **`feedback_store.py`** — SQLite. `regex_feedback` holds current state keyed by
-  a hash of the regex string; `feedback_history` is an append-only audit trail.
-- **`merge_feedback.py`** — reconciles DBs from reviewers who each ran their own
-  copy. Newest write wins per regex, all versions preserved, conflicts reported.
+Python · pandas · numpy · [chdb](https://github.com/chdb-io/chdb) (embedded
+ClickHouse) · Streamlit · SQLite · Parquet · uv
 
-## Quick start
+## Running it
 
 ```bash
-uv sync                                    # python 3.12 + chdb, streamlit, pandas
-uv run build_review_db.py                  # drop the corpus parquet here first
+uv sync
+uv run build_review_db.py                  # put the corpus parquet here first
 REVIEWER="your name" uv run streamlit run review_app.py
 ```
 
-[QUICKSTART.md](QUICKSTART.md) is the reviewer-facing walkthrough.
-[SHARING.md](SHARING.md) covers the two deployment shapes — one LAN host, or one
-copy per reviewer plus a merge.
+[QUICKSTART.md](QUICKSTART.md) for the reviewer walkthrough, [SHARING.md](SHARING.md)
+for running it across a team.
 
-## Data
+## A note on the data
 
-**No data is in this repo, by design.** The corpus parquet, the built
-`chdb_review/` index and `review_feedback.db` are gitignored — the corpus is real
-customer transaction data. Examples in [FINDINGS.md](FINDINGS.md) are masked.
-Everything except the parquet regenerates from it.
+The transaction corpus is real customer data and is **not** in this repository —
+it's excluded, along with the database built from it. Transaction examples shown
+here and in the findings have identifying values masked.
