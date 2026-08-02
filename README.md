@@ -2,7 +2,7 @@
 
 **Checking a machine-generated bank-statement parser across 6.8 million transactions.**
 
-📋 **[The findings — 23 defects](FINDINGS.md)**
+📋 **[The findings — 30 defects](FINDINGS.md)**
 
 ---
 
@@ -27,11 +27,14 @@ was part of that review, and I built the tooling we used to do it.
 
 ## The scale of the problem
 
-| | |
-|---|---|
-| Transactions | **6,811,926** |
-| Patterns the model wrote | **1,832** |
-| Fields each pattern tries to extract | 30 |
+| | Transactions | Patterns |
+|---|---|---|
+| Money out (debit) | 4,762,821 | 829 |
+| Money in (credit) | 2,049,105 | 1,201 |
+| **Total** | **6,811,926** | **1,832** |
+
+Each pattern tries to extract 30 fields. Debit and credit were reviewed as two
+separate passes.
 
 The model's output had errors in it. Nobody knew which of the 1,832 patterns
 were wrong, or how.
@@ -73,7 +76,7 @@ read a single pattern.
 
 ## What the review found
 
-23 distinct problems, written up in **[FINDINGS.md](FINDINGS.md)**. A few
+30 distinct problems, written up in **[FINDINGS.md](FINDINGS.md)**. A few
 examples of what "wrong" looked like in practice:
 
 | Transaction text | What the parser did | What it should do |
@@ -84,10 +87,16 @@ examples of what "wrong" looked like in practice:
 | Two patterns identical except one digit-count | Created two separate groups | One pattern covers both |
 | `txn_period = 26/2459` | Accepted it | There's no month 24 — reject it |
 
-The more useful output was the layer underneath: those 23 problems trace back to
-**4 underlying causes**. Punctuation handling alone explains five of them. That
-turns "here are 23 bugs" into "fix these four things, in this order" — which is
-the difference between a complaint and a plan.
+**Four problems were flagged independently in both the debit and credit passes** —
+missing anchors, duplicate patterns, punctuation-driven splitting, and garbage
+date periods. Two separate reviews, different transaction types, largely
+different patterns, same four complaints. That makes those four properties of how
+the model writes patterns, not quirks of the data it was reading — and it's the
+strongest signal in the whole report about what to fix first.
+
+Underneath the 30, there are **4 root causes**. Punctuation handling alone
+explains five of the symptoms. That turns "here are 30 bugs" into "fix these four
+things, in this order" — the difference between a complaint and a plan.
 
 ## My role
 
@@ -97,7 +106,7 @@ The review was a data analytics team effort. My contribution:
   fill-rate scorecards and the per-pattern distribution, and the app the team
   used to work through the patterns.
 - **Reviewed my share of the patterns** and contributed findings to the report.
-- **Consolidated the raw observations** into the 23 distinct defects and 4 root
+- **Consolidated the raw observations** into the 30 distinct defects and 4 root
   causes in [FINDINGS.md](FINDINGS.md).
 
 The code here is mine; the review itself was shared, which is why the tool
@@ -134,7 +143,7 @@ one-time 10-second build, everything is instant.
 
 **Several reviewers, one set of conclusions.** Reviewing 1,832 patterns across a
 team generates the same underlying bug described a dozen different ways.
-Consolidating ~30 raw observations into 23 distinct defects and 4 root causes was
+Consolidating 35 raw observations into 30 distinct defects and 4 root causes was
 a real part of the work — an unmerged list would have sent the model owners
 chasing symptoms.
 
