@@ -1,4 +1,4 @@
-# Regex & Feature-Map Review — Findings
+# Regex & Feature-Map Review — Findings Found
 
 Review of model-generated regexes and `group_feature_map` output over a corpus of
 **6,811,926 transactions / 1,832 distinct regexes**, extracting 30 feature
